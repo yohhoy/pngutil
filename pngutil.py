@@ -4,7 +4,9 @@ PNG utilities tool
 Copyright (c) 2023 yohhoy
 """
 import argparse
+import math
 import struct
+import sys
 
 
 PNG_SIG = b'\x89PNG\x0d\x0a\x1a\x0a'
@@ -94,6 +96,39 @@ def parse_bKGD(chunk, ihdr):
         print(f'  Palette index={pi}')
 
 
+# process IDAT data
+def process_idat(png, args):
+    idat_idx = [idx for idx, chunk in enumerate(png) if chunk[0] == b'IDAT']
+    before_idat = [chunk for idx, chunk in enumerate(png) if idx < idat_idx[0]]
+    after_idat = [chunk for idx, chunk in enumerate(png) if idat_idx[0] < idx and idx not in idat_idx]
+    if args.merge_idat:
+        # merge IDAT chunks
+        idat_chunks = [chunk[1] for chunk in png if chunk[0] == b'IDAT']
+        if len(idat_chunks) > 1 and args.merge_idat:
+            idat = bytearray().join(idat_chunks)
+            print(f'Merge: {len(idat_chunks)} IDAT chunks ({len(idat)} bytes)')
+            png = before_idat
+            png.append((b'IDAT', idat))
+            png += after_idat
+    if args.split_idat > 0:
+        # split IDAT chunk
+        idat_chunks = [chunk[1] for chunk in png if chunk[0] == b'IDAT']
+        if len(idat_chunks) > 1:
+            print(f'Split: Input PNG has {len(idat_chunks)} IDAT chunks.')
+            sys.exit(1)
+        idat_size = len(idat_chunks[0])
+        nchunk, rem = math.ceil(idat_size / args.split_idat), idat_size % args.split_idat
+        print(f'Split: {nchunk} IDAT chunks ({args.split_idat}+{rem} bytes)')
+        png = before_idat
+        pos = 0
+        while pos < idat_size:
+            end_pos = min(pos + args.split_idat, idat_size)
+            png.append((b'IDAT', idat[pos:end_pos]))
+            pos = end_pos
+        png += after_idat
+    return png
+
+
 # process PNG format
 def process_png(fin, fout, args):
     signature = fin.read(8)
@@ -104,28 +139,15 @@ def process_png(fin, fout, args):
     parser = {b'cHRM': parse_cHRM, b'bKGD': parse_bKGD, b'tEXt': parse_tEXt}
     while True:
         chunk = read_chunk(fin, args)
+        png.append(chunk)
         if chunk[0] == b'IHDR':
             ihdr = parse_IHDR(chunk)
         elif chunk[0] == b'IEND':
             break
         if chunk[0] in parser.keys():
             parser[chunk[0]](chunk, ihdr)
-        png.append(chunk)
-    # merge IDAT chunks
-    if args.merge_idat:
-        idat_chunks = [chunk[1] for chunk in png if chunk[0] == b'IDAT']
-        if len(idat_chunks) > 1:
-            idat = bytearray().join(idat_chunks)
-            print(f'Merge: {len(idat_chunks)} IDAT chunks, {len(idat)} bytes')
-            new_png = []
-            for chunk in png:
-                if chunk[0] == b'IDAT':
-                    if idat:
-                        new_png.append((b'IDAT', idat))
-                        idat = None
-                else:
-                    new_png.append(chunk)
-            png = new_png
+    # process IDAT chunks
+    png = process_idat(png, args)
     # write PNG chunks
     for chunk in png:
         write_chunk(fout, *chunk)
@@ -136,7 +158,7 @@ def main(args):
     print(f'Output: {args.outfile}')
     # process PNG format
     print(f'Filter: keep={args.keep}')
-    print(f'Option: merge-idat={args.merge_idat}')
+    print(f'Option: merge-idat={args.merge_idat} split-idat={args.split_idat}')
     args.keep = [bytes(ct, 'ascii') for ct in args.keep]
     with open(args.infile, 'rb') as fin, open(args.outfile, 'wb') as fout:
         process_png(fin, fout, args)
@@ -149,7 +171,9 @@ if __name__ == '__main__':
     parser.add_argument('--keep', action='append', metavar='CHUNK',
                         default=['IHDR', 'IDAT', 'PLTE', 'IEND'],
                         help='keep PNG chunk (%(default)s)')
-    parser.add_argument('--merge-idat', metavar='0|1', default=1,
+    parser.add_argument('--merge-idat', metavar='0|1', type=int, default=1,
                         help='merge to single IDAT chunk (default: %(default)s)')
+    parser.add_argument('--split-idat', metavar='BYTES', type=int, default=0,
+                        help='split to multiple IDAT chunks (default: None)')
     args = parser.parse_args()
     main(args)
