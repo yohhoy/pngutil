@@ -101,8 +101,8 @@ def process_idat(png, args):
     idat_idx = [idx for idx, chunk in enumerate(png) if chunk[0] == b'IDAT']
     before_idat = [chunk for idx, chunk in enumerate(png) if idx < idat_idx[0]]
     after_idat = [chunk for idx, chunk in enumerate(png) if idat_idx[0] < idx and idx not in idat_idx]
+    # merge IDAT chunks
     if args.merge_idat:
-        # merge IDAT chunks
         idat_chunks = [chunk[1] for chunk in png if chunk[0] == b'IDAT']
         if len(idat_chunks) > 1 and args.merge_idat:
             idat = bytearray().join(idat_chunks)
@@ -110,13 +110,14 @@ def process_idat(png, args):
             png = before_idat
             png.append((b'IDAT', idat))
             png += after_idat
+    # split IDAT chunk
     if args.split_idat > 0:
-        # split IDAT chunk
         idat_chunks = [chunk[1] for chunk in png if chunk[0] == b'IDAT']
         if len(idat_chunks) > 1:
             print(f'Split: Input PNG has {len(idat_chunks)} IDAT chunks.')
             sys.exit(1)
-        idat_size = len(idat_chunks[0])
+        idat = idat_chunks[0]
+        idat_size = len(idat)
         nchunk, rem = math.ceil(idat_size / args.split_idat), idat_size % args.split_idat
         print(f'Split: {nchunk} IDAT chunks ({args.split_idat}+{rem} bytes)')
         png = before_idat
@@ -139,12 +140,13 @@ def process_png(fin, fout, args):
     parser = {b'cHRM': parse_cHRM, b'bKGD': parse_bKGD, b'tEXt': parse_tEXt}
     while True:
         chunk = read_chunk(fin, args)
-        png.append(chunk)
+        if chunk[0] in args.keep:
+            png.append(chunk)
         if chunk[0] == b'IHDR':
             ihdr = parse_IHDR(chunk)
         elif chunk[0] == b'IEND':
             break
-        if chunk[0] in parser.keys():
+        if chunk[0] in parser:
             parser[chunk[0]](chunk, ihdr)
     # process IDAT chunks
     png = process_idat(png, args)
@@ -157,8 +159,8 @@ def main(args):
     print(f'Input: {args.infile}')
     print(f'Output: {args.outfile}')
     # process PNG format
-    print(f'Filter: keep={args.keep}')
-    print(f'Option: merge-idat={args.merge_idat} split-idat={args.split_idat}')
+    print(f'FilterChunk: keep={args.keep}')
+    print(f'ProcessIDAT: merge={args.merge_idat} split={args.split_idat}')
     args.keep = [bytes(ct, 'ascii') for ct in args.keep]
     with open(args.infile, 'rb') as fin, open(args.outfile, 'wb') as fout:
         process_png(fin, fout, args)
@@ -172,7 +174,7 @@ if __name__ == '__main__':
                         default=['IHDR', 'IDAT', 'PLTE', 'IEND'],
                         help='keep PNG chunk (%(default)s)')
     parser.add_argument('--merge-idat', metavar='0|1', type=int, default=1,
-                        help='merge to single IDAT chunk (default: %(default)s)')
+                        help='merge into single IDAT chunk (default: %(default)s)')
     parser.add_argument('--split-idat', metavar='BYTES', type=int, default=0,
                         help='split to multiple IDAT chunks (default: None)')
     args = parser.parse_args()
