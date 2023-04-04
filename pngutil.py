@@ -7,6 +7,7 @@ import argparse
 import math
 import struct
 import sys
+import zlib
 
 
 PNG_SIG = b'\x89PNG\x0d\x0a\x1a\x0a'
@@ -107,9 +108,22 @@ def process_idat(png, args):
         if len(idat_chunks) > 1 and args.merge_idat:
             idat = bytearray().join(idat_chunks)
             print(f'Merge: {len(idat_chunks)} IDAT chunks ({len(idat)} bytes)')
-            png = before_idat
+            png = before_idat.copy()
             png.append((b'IDAT', idat))
             png += after_idat
+    # recompress zlib/deflate stream
+    if args.recompress >= 0:
+        idat_chunks = [chunk[1] for chunk in png if chunk[0] == b'IDAT']
+        if len(idat_chunks) > 1:
+            print(f'Delfate: Input PNG has multiple IDAT chunks; Use "--merge-idat 1".')
+            sys.exit(1)
+        idat = idat_chunks[0]
+        idat_size = len(idat)
+        idat = zlib.compress(zlib.decompress(idat), level=args.recompress)
+        print(f'Recompress: CL={args.recompress} ({idat_size} to {len(idat)} bytes)')
+        png = before_idat.copy()
+        png.append((b'IDAT', idat))
+        png += after_idat
     # split IDAT chunk
     if args.split_idat > 0:
         idat_chunks = [chunk[1] for chunk in png if chunk[0] == b'IDAT']
@@ -120,7 +134,7 @@ def process_idat(png, args):
         idat_size = len(idat)
         nchunk, rem = math.ceil(idat_size / args.split_idat), idat_size % args.split_idat
         print(f'Split: {nchunk} IDAT chunks ({args.split_idat}+{rem} bytes)')
-        png = before_idat
+        png = before_idat.copy()
         pos = 0
         while pos < idat_size:
             end_pos = min(pos + args.split_idat, idat_size)
@@ -161,6 +175,7 @@ def main(args):
     # process PNG format
     print(f'FilterChunk: keep={args.keep}')
     print(f'ProcessIDAT: merge={args.merge_idat} split={args.split_idat}')
+    print(f'Recompress: CL={args.recompress}')
     args.keep = [bytes(ct, 'ascii') for ct in args.keep]
     with open(args.infile, 'rb') as fin, open(args.outfile, 'wb') as fout:
         process_png(fin, fout, args)
@@ -173,9 +188,11 @@ if __name__ == '__main__':
     parser.add_argument('--keep', action='append', metavar='CHUNK',
                         default=['IHDR', 'IDAT', 'PLTE', 'IEND'],
                         help='keep PNG chunk (%(default)s)')
-    parser.add_argument('--merge-idat', metavar='0|1', type=int, default=1,
+    parser.add_argument('--merge-idat', type=int, choices=(0, 1), default=1,
                         help='merge into single IDAT chunk (default: %(default)s)')
-    parser.add_argument('--split-idat', metavar='BYTES', type=int, default=0,
-                        help='split to multiple IDAT chunks (default: None)')
+    parser.add_argument('--split-idat', metavar='N', type=int, default=0,
+                        help='split N bytes to multiple IDAT chunks (default: None)')
+    parser.add_argument('--recompress', metavar='CL', type=int, default=-1,
+                        help='recompress zlib/deflate with CL=[0, 9] (default: None)')
     args = parser.parse_args()
     main(args)
