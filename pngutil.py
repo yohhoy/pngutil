@@ -97,6 +97,45 @@ def parse_bKGD(chunk, ihdr):
         print(f'  Palette index={pi}')
 
 
+# recompress IDAT data
+def recompress_idat(png, args):
+    if args.recompress == -1 and not args.bloat:
+        return png
+    idat_idx = [idx for idx, chunk in enumerate(png) if chunk[0] == b'IDAT']
+    before_idat = [chunk for idx, chunk in enumerate(png) if idx < idat_idx[0]]
+    after_idat = [chunk for idx, chunk in enumerate(png) if idat_idx[0] < idx and idx not in idat_idx]
+    if len(idat_idx) > 1:
+        print(f'Recompress: Input PNG has multiple IDAT chunks; Use "--merge-idat 1".')
+        sys.exit(1)
+    # recompress zlib/deflate stream
+    if args.recompress >= 0:
+        idat = [chunk[1] for chunk in png if chunk[0] == b'IDAT'][0]
+        idat_size = len(idat)
+        idat = zlib.compress(zlib.decompress(idat), level=args.recompress)
+        print(f'Recompress: CL={args.recompress} ({idat_size} to {len(idat)} bytes)')
+        png = before_idat.copy()
+        png.append((b'IDAT', idat))
+        png += after_idat
+    # bloat zlib/deflate stream
+    if args.bloat:
+        idat = [chunk[1] for chunk in png if chunk[0] == b'IDAT'][0]
+        idat_size = len(idat)
+        data = zlib.decompress(idat)
+        # generate deflate 'non-compressed blocks' for source ONE byte
+        idat = bytearray(b'\x78\x01')   
+        for b in data[:-1]:
+            idat += b'\x00\x01\x00\xfe\xff' # BFINAL=0 BTYPE=00
+            idat.append(b)
+        idat += b'\x01\x01\x00\xfe\xff' # BFINAL=1 BTYPE=00
+        idat.append(data[-1])
+        idat += struct.pack('>I', zlib.adler32(data))
+        print(f'Recompress: bloating ({idat_size} to {len(idat)} bytes)')
+        png = before_idat.copy()
+        png.append((b'IDAT', idat))
+        png += after_idat
+    return png
+
+
 # process IDAT data
 def process_idat(png, args):
     idat_idx = [idx for idx, chunk in enumerate(png) if chunk[0] == b'IDAT']
@@ -111,19 +150,8 @@ def process_idat(png, args):
             png = before_idat.copy()
             png.append((b'IDAT', idat))
             png += after_idat
-    # recompress zlib/deflate stream
-    if args.recompress >= 0:
-        idat_chunks = [chunk[1] for chunk in png if chunk[0] == b'IDAT']
-        if len(idat_chunks) > 1:
-            print(f'Delfate: Input PNG has multiple IDAT chunks; Use "--merge-idat 1".')
-            sys.exit(1)
-        idat = idat_chunks[0]
-        idat_size = len(idat)
-        idat = zlib.compress(zlib.decompress(idat), level=args.recompress)
-        print(f'Recompress: CL={args.recompress} ({idat_size} to {len(idat)} bytes)')
-        png = before_idat.copy()
-        png.append((b'IDAT', idat))
-        png += after_idat
+    # recompress IDAT data
+    png = recompress_idat(png, args)
     # split IDAT chunk
     if args.split_idat > 0:
         idat_chunks = [chunk[1] for chunk in png if chunk[0] == b'IDAT']
@@ -175,7 +203,7 @@ def main(args):
     # process PNG format
     print(f'FilterChunk: keep={args.keep}')
     print(f'ProcessIDAT: merge={args.merge_idat} split={args.split_idat}')
-    print(f'Recompress: CL={args.recompress}')
+    print(f'Recompress: CL={args.recompress} bloat={args.bloat}')
     args.keep = [bytes(ct, 'ascii') for ct in args.keep]
     with open(args.infile, 'rb') as fin, open(args.outfile, 'wb') as fout:
         process_png(fin, fout, args)
@@ -194,5 +222,7 @@ if __name__ == '__main__':
                         help='split N bytes to multiple IDAT chunks (default: None)')
     parser.add_argument('--recompress', metavar='CL', type=int, default=-1,
                         help='recompress zlib/deflate with CL=[0, 9] (default: None)')
+    parser.add_argument('--bloat', action='store_true',
+                        help='<WTF> bloat deflate stream with non-compressed block')
     args = parser.parse_args()
     main(args)
