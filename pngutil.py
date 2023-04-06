@@ -4,6 +4,7 @@ PNG utilities tool
 Copyright (c) 2023 yohhoy
 """
 import argparse
+import binascii
 import math
 import struct
 import sys
@@ -13,21 +14,6 @@ import zlib
 PNG_SIG = b'\x89PNG\x0d\x0a\x1a\x0a'
 
 
-def crc_lut(n):
-    for _ in range(8):
-        n = 0xedb88320 ^ (n >> 1) if n & 1 else n >> 1
-    return n
-CRC_TABLE = [crc_lut(n) for n in range(256)]
-
-
-def calc_crc(data):
-    def update_crc(c):
-        for b in data:
-            c = CRC_TABLE[(c ^ b) & 0xff] ^ (c >> 8)
-        return c
-    return update_crc(0xffffffff) ^ 0xffffffff
-
-
 # read PNG chunk
 def read_chunk(f, args):
     size, ctype = struct.unpack('>I4s', f.read(8))
@@ -35,7 +21,7 @@ def read_chunk(f, args):
     print(f'{ctype.decode("ascii")}: length={size}{discard}')
     data = f.read(size)
     crc = struct.unpack('>I', f.read(4))[0]
-    assert crc == calc_crc(ctype + data)
+    assert crc == binascii.crc32(ctype + data)
     return (ctype, data)
 
 
@@ -45,7 +31,7 @@ def write_chunk(f, ctype, data):
     f.write(struct.pack('>I', len(data)))
     f.write(ctype)
     f.write(data)
-    f.write(struct.pack('>I', calc_crc(ctype + data)))
+    f.write(struct.pack('>I', binascii.crc32(ctype + data)))
 
 
 # parse image header(IHDR) chunk
@@ -97,6 +83,18 @@ def parse_bKGD(chunk, ihdr):
         print(f'  Palette index={pi}')
 
 
+# encode zlib/deflate 'non-compressed blocks' per ONE byte
+def encode_noncompress(data):
+    stream = bytearray(b'\x78\x01')   
+    for b in data[:-1]:
+        stream += b'\x00\x01\x00\xfe\xff' # BFINAL=0 BTYPE=00
+        stream.append(b)
+    stream += b'\x01\x01\x00\xfe\xff' # BFINAL=1 BTYPE=00
+    stream.append(data[-1])
+    stream += struct.pack('>I', zlib.adler32(data))
+    return stream
+
+
 # recompress IDAT data
 def recompress_idat(png, args):
     if args.recompress == -1 and not args.bloat:
@@ -120,16 +118,8 @@ def recompress_idat(png, args):
     if args.bloat:
         idat = [chunk[1] for chunk in png if chunk[0] == b'IDAT'][0]
         idat_size = len(idat)
-        data = zlib.decompress(idat)
-        # generate deflate 'non-compressed blocks' for source ONE byte
-        idat = bytearray(b'\x78\x01')   
-        for b in data[:-1]:
-            idat += b'\x00\x01\x00\xfe\xff' # BFINAL=0 BTYPE=00
-            idat.append(b)
-        idat += b'\x01\x01\x00\xfe\xff' # BFINAL=1 BTYPE=00
-        idat.append(data[-1])
-        idat += struct.pack('>I', zlib.adler32(data))
-        print(f'Recompress: bloating ({idat_size} to {len(idat)} bytes)')
+        idat = encode_noncompress(zlib.decompress(idat))
+        print(f'Recompress: bloating x{len(idat)/idat_size:.2f} ({idat_size} to {len(idat)} bytes)')
         png = before_idat.copy()
         png.append((b'IDAT', idat))
         png += after_idat
@@ -161,7 +151,7 @@ def process_idat(png, args):
         idat = idat_chunks[0]
         idat_size = len(idat)
         nchunk, rem = math.ceil(idat_size / args.split_idat), idat_size % args.split_idat
-        print(f'Split: {nchunk} IDAT chunks ({args.split_idat}+{rem} bytes)')
+        print(f'Split: {nchunk} IDAT chunks ({args.split_idat},{rem} bytes/chunk)')
         png = before_idat.copy()
         pos = 0
         while pos < idat_size:
