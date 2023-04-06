@@ -14,6 +14,77 @@ import zlib
 PNG_SIG = b'\x89PNG\x0d\x0a\x1a\x0a'
 
 
+# bit writer for Deflate(RFC1951)
+class BitWriter():
+    def __init__(self):
+        self.data = bytearray()
+        self.blen = 0
+        self.bbuf = 0
+    # write n-bits
+    def bits(self, value, n):
+        assert value <= (1 << n) - 1
+        while 0 < n:
+            m = min(n, 8 - self.blen)
+            mb = (1 << m) - 1
+            self.bbuf |= (value & mb) << self.blen
+            self.blen += m
+            value >>= m
+            n -= m
+            if self.blen == 8:
+                self.data.append(self.bbuf)
+                self.blen = 0
+                self.bbuf = 0
+        return self
+    def flush(self):
+        self.data.append(self.bbuf)
+        self.blen = 0
+        self.bbuf = 0
+        return self.data
+
+
+# Huffman encoder
+class HuffmanEncoder():
+    def __init__(self, lens):
+        # huffman lengths to huffman codes (RFC1951, 3.2.2)
+        def len2code(lens):
+            # step1
+            MAX_BITS = max(lens)
+            bl_count = [0] * (MAX_BITS + 1)
+            for l in lens:
+                bl_count[l] += 1
+            # step2
+            code = 0
+            bl_count[0] = 0
+            next_code = [0] * (MAX_BITS + 1)
+            for bits in range(1, MAX_BITS + 1):
+                code = (code + bl_count[bits-1]) << 1
+                next_code[bits] = code
+            # step3
+            codes = [0] * len(lens)
+            for n, l in enumerate(lens):
+                if l != 0:
+                    codes[n] = next_code[l]
+                    next_code[l] += 1
+            return codes
+        self.lens = lens
+        self.codes = len2code(lens)
+        # reverse bits in codes
+        assert len([1 for n, c in zip(lens, self.codes) if c >= (1 << n)]) == 0
+        def revbits(v, n):
+            rv = 0
+            for i in range(n):
+                rv <<= 1
+                rv |= (v >> i) & 1
+            return rv
+        self.rcodes = [revbits(v, n) for v, n in zip(self.codes, lens)]
+    # encode symbol
+    def encode(self, w, sym):
+        w.bits(self.rcodes[sym], self.lens[sym])
+    # debug: codes list
+    def codes_str(self):
+        return ', '.join([f'{c:0{l}b}' if l else '-' for c,l in zip(self.codes, self.lens)])
+
+
 # read PNG chunk
 def read_chunk(f, args):
     size, ctype = struct.unpack('>I4s', f.read(8))
@@ -83,7 +154,7 @@ def parse_bKGD(chunk, ihdr):
         print(f'  Palette index={pi}')
 
 
-# encode zlib/deflate 'non-compressed blocks' per ONE byte
+# encode zlib/deflate 'non-compressed block' per ONE byte
 def encode_noncompress(data):
     stream = bytearray(b'\x78\x01')   
     for b in data[:-1]:
@@ -92,12 +163,57 @@ def encode_noncompress(data):
     stream += b'\x01\x01\x00\xfe\xff' # BFINAL=1 BTYPE=00
     stream.append(data[-1])
     stream += struct.pack('>I', zlib.adler32(data))
+    # SANITY CHECK
+    assert data == zlib.decompress(stream)
+    return stream
+
+
+# encode zlib/deflate 'dynamic Huffman codes block' per ONE byte
+def encode_dynamichuffman(data):
+    stream = bytearray(b'\x78\x01')
+    # https://github.com/madler/zlib/blob/v1.2.13/inflate.c#L946
+    HLIT, HDIST, HCLEN = 286, 30, 19
+    DEFLATE_CLEN_ORD = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+    CLEN = [2, 2, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+    clen = [CLEN[DEFLATE_CLEN_ORD.index(n)] for n in range(HCLEN)]
+    henc_clen = HuffmanEncoder(clen)
+    print(f'  CLEN={clen}')
+    print(f'  CLEN_CODES={henc_clen.codes_str()}')
+    LIT_LENS = [8] * 144 + [9] * 112 + [7] * 24 + [8] * (8 - 2)
+    assert len(LIT_LENS) == HLIT
+    henc_lit = HuffmanEncoder(LIT_LENS)
+    print(f'  LIT_LENS={LIT_LENS}')
+    print(f'  LIT_CODES={henc_lit.codes_str()}')
+    DIST_LENS = [5] * HDIST
+    henc_dist = HuffmanEncoder(DIST_LENS)
+    print(f'  DIST_LENS={DIST_LENS}')
+    print(f'  DIST_CODES={henc_dist.codes_str()}')
+    w = BitWriter()
+    for n, b in enumerate(data):
+        bfinal = 1 if (n == len(data) - 1) else 0
+        w.bits(bfinal, 1)   # BFINAL
+        w.bits(0b10, 2)     # BTYPE=10
+        w.bits(HLIT - 257, 5)
+        w.bits(HDIST - 1, 5)
+        w.bits(HCLEN - 4, 4)
+        for n in CLEN:
+            w.bits(n, 3)
+        for s in LIT_LENS:
+            henc_clen.encode(w, s)
+        for s in DIST_LENS:
+            henc_clen.encode(w, s)
+        henc_lit.encode(w, b)
+        henc_lit.encode(w, 256) # end of blocks
+    stream += w.flush()
+    stream += struct.pack('>I', zlib.adler32(data))
+    # SANITY CHECK
+    assert data == zlib.decompress(stream)
     return stream
 
 
 # recompress IDAT data
 def recompress_idat(png, args):
-    if args.recompress == -1 and not args.bloat:
+    if args.recompress == -1 and not (args.bloat or args.explode):
         return png
     idat_idx = [idx for idx, chunk in enumerate(png) if chunk[0] == b'IDAT']
     before_idat = [chunk for idx, chunk in enumerate(png) if idx < idat_idx[0]]
@@ -114,12 +230,16 @@ def recompress_idat(png, args):
         png = before_idat.copy()
         png.append((b'IDAT', idat))
         png += after_idat
-    # bloat zlib/deflate stream
-    if args.bloat:
+    # custom zlib/deflate stream
+    if args.bloat or args.explode:
         idat = [chunk[1] for chunk in png if chunk[0] == b'IDAT'][0]
         idat_size = len(idat)
-        idat = encode_noncompress(zlib.decompress(idat))
-        print(f'Recompress: bloating x{len(idat)/idat_size:.2f} ({idat_size} to {len(idat)} bytes)')
+        if args.explode:
+            idat = encode_dynamichuffman(zlib.decompress(idat))
+            print(f'Recompress: exploding x{len(idat)/idat_size:.2f} ({idat_size} to {len(idat)} bytes)')
+        if args.bloat:
+            idat = encode_noncompress(zlib.decompress(idat))
+            print(f'Recompress: bloating x{len(idat)/idat_size:.2f} ({idat_size} to {len(idat)} bytes)')
         png = before_idat.copy()
         png.append((b'IDAT', idat))
         png += after_idat
@@ -193,7 +313,7 @@ def main(args):
     # process PNG format
     print(f'FilterChunk: keep={args.keep}')
     print(f'ProcessIDAT: merge={args.merge_idat} split={args.split_idat}')
-    print(f'Recompress: CL={args.recompress} bloat={args.bloat}')
+    print(f'Recompress: CL={args.recompress} bloat={args.bloat} explode={args.explode}')
     args.keep = [bytes(ct, 'ascii') for ct in args.keep]
     with open(args.infile, 'rb') as fin, open(args.outfile, 'wb') as fout:
         process_png(fin, fout, args)
@@ -214,5 +334,7 @@ if __name__ == '__main__':
                         help='recompress zlib/deflate with CL=[0, 9] (default: None)')
     parser.add_argument('--bloat', action='store_true',
                         help='<WTF> bloat deflate stream with non-compressed block')
+    parser.add_argument('--explode', action='store_true',
+                        help='<WTF> explode deflate stream with dynamic Huffman codes block')
     args = parser.parse_args()
     main(args)
