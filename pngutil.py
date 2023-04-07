@@ -36,7 +36,8 @@ class BitWriter():
                 self.bbuf = 0
         return self
     def flush(self):
-        self.data.append(self.bbuf)
+        if self.blen > 0:
+            self.data.append(self.bbuf)
         self.blen = 0
         self.bbuf = 0
         return self.data
@@ -193,12 +194,16 @@ def encode_dynamichuffman(data):
     henc_clen = HuffmanEncoder(clen)
     print(f'  CLEN={clen}')
     print(f'  CLEN_CODES={henc_clen.codes_str()}')
-    LIT_LENS = [15] + [8] * 255 + [15] + [9, 10, 11, 12, 13, 14] + [0] * 23
+    LIT_LENS = [8] * 256 + [15] + [9, 10, 11, 12, 13, 14] + [0] * 23  # {b,256}->15
     assert len(LIT_LENS) == HLIT
-    zlib_validate_lens(LIT_LENS)  # avoid 'invalid literal/lengths set'
-    henc_lit = HuffmanEncoder(LIT_LENS)
-    print(f'  LIT_LENS={LIT_LENS}')
-    print(f'  LIT_CODES={henc_lit.codes_str()}')
+    print(f'  LIT_LENS(base)={LIT_LENS}')
+    henc_lit = []
+    for n in range(256):
+        lit_lens = LIT_LENS.copy()
+        lit_lens[n] = 15
+        zlib_validate_lens(lit_lens)  # avoid 'invalid literal/lengths set'
+        henc_lit.append(HuffmanEncoder(lit_lens))
+        #print(f'  LIT_CODES[{n}]={henc_lit[n].codes_str()}')
     DIST_LENS = [0] * HDIST
     zlib_validate_lens(DIST_LENS)  # avoid 'invalid distances set'
     henc_dist = HuffmanEncoder(DIST_LENS)
@@ -214,12 +219,12 @@ def encode_dynamichuffman(data):
         w.bits(HCLEN - 4, 4)
         for n in CLEN:
             w.bits(n, 3)
-        for s in LIT_LENS:
+        for s in henc_lit[b].lens:
             henc_clen.encode(w, s)
         for s in DIST_LENS:
             henc_clen.encode(w, s)
-        henc_lit.encode(w, b)
-        henc_lit.encode(w, 256) # end of blocks
+        henc_lit[b].encode(w, b)
+        henc_lit[b].encode(w, 256) # end of blocks
     stream += w.flush()
     stream += struct.pack('>I', zlib.adler32(data))
     # SANITY CHECK
