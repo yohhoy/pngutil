@@ -170,21 +170,37 @@ def encode_noncompress(data):
 
 # encode zlib/deflate 'dynamic Huffman codes block' per ONE byte
 def encode_dynamichuffman(data):
+    # https://github.com/madler/zlib/blob/v1.2.13/inftrees.c#L130-L138
+    def zlib_validate_lens(lens):
+        MAX_BITS = max(lens)
+        count = [0] * (MAX_BITS + 1)
+        for n in lens:
+            count[n] += 1
+        left = 1
+        for n in range(1, MAX_BITS + 1):
+            left <<= 1
+            left -= count[n]
+            assert left >= 0, 'over-subscribed'
+        assert left <= 0 or MAX_BITS == 0, 'incomplete set'
     stream = bytearray(b'\x78\x01')
     # https://github.com/madler/zlib/blob/v1.2.13/inflate.c#L946
     HLIT, HDIST, HCLEN = 286, 30, 19
     DEFLATE_CLEN_ORD = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
-    CLEN = [2, 2, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+    CLEN = [0] * 3 + [4] * 16
+    assert len(CLEN) == HCLEN
     clen = [CLEN[DEFLATE_CLEN_ORD.index(n)] for n in range(HCLEN)]
+    zlib_validate_lens(clen)  # avoid 'invalid code lengths set'
     henc_clen = HuffmanEncoder(clen)
     print(f'  CLEN={clen}')
     print(f'  CLEN_CODES={henc_clen.codes_str()}')
-    LIT_LENS = [8] * 144 + [9] * 112 + [7] * 24 + [8] * (8 - 2)
+    LIT_LENS = [15] + [8] * 255 + [15] + [9, 10, 11, 12, 13, 14] + [0] * 23
     assert len(LIT_LENS) == HLIT
+    zlib_validate_lens(LIT_LENS)  # avoid 'invalid literal/lengths set'
     henc_lit = HuffmanEncoder(LIT_LENS)
     print(f'  LIT_LENS={LIT_LENS}')
     print(f'  LIT_CODES={henc_lit.codes_str()}')
-    DIST_LENS = [5] * HDIST
+    DIST_LENS = [0] * HDIST
+    zlib_validate_lens(DIST_LENS)  # avoid 'invalid distances set'
     henc_dist = HuffmanEncoder(DIST_LENS)
     print(f'  DIST_LENS={DIST_LENS}')
     print(f'  DIST_CODES={henc_dist.codes_str()}')
