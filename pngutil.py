@@ -187,7 +187,7 @@ def encode_dynamichuffman(data):
     # https://github.com/madler/zlib/blob/v1.2.13/inflate.c#L946
     HLIT, HDIST, HCLEN = 286, 30, 19
     DEFLATE_CLEN_ORD = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
-    CLEN = [4, 4, 4, 7, 7, 4, 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 6]  # {0,8}->7, 15->6, 9->5
+    CLEN = [1, 2, 3] + [7] * 16
     assert len(CLEN) == HCLEN
     clen = [CLEN[DEFLATE_CLEN_ORD.index(n)] for n in range(HCLEN)]
     zlib_validate_lens(clen)  # avoid 'invalid code lengths set'
