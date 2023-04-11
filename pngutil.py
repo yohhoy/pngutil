@@ -155,6 +155,18 @@ def parse_bKGD(chunk, ihdr):
         print(f'  Palette index={pi}')
 
 
+# parse image last-modification time(tIME) chunk
+def parse_tIME(chunk, ihdr):
+    assert chunk[0] == b'tIME'
+    y, mo, d, h, m, s = struct.unpack('>HBBBBB', chunk[1])
+    print(f'  Year={y}')
+    print(f'  Month={mo}')
+    print(f'  Day={d}')
+    print(f'  Hour={h}')
+    print(f'  Minute={m}')
+    print(f'  Second={s}')
+
+
 # encode zlib/deflate 'non-compressed block' per ONE byte
 def encode_noncompress(data):
     stream = bytearray(b'\x78\x01')   
@@ -310,7 +322,7 @@ def process_png(fin, fout, args):
     fout.write(PNG_SIG)
     # read PNG chunks (with filter)
     png, ihdr = [], None
-    parser = {b'cHRM': parse_cHRM, b'bKGD': parse_bKGD, b'tEXt': parse_tEXt}
+    parser = {b'cHRM': parse_cHRM, b'bKGD': parse_bKGD, b'tEXt': parse_tEXt, b'tIME': parse_tIME}
     while True:
         chunk = read_chunk(fin, args)
         if chunk[0] in args.keep:
