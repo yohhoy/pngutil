@@ -138,12 +138,22 @@ def parse_tEXt(chunk, ihdr):
     print(f'  Text="{text.decode("latin-1")}"')
 
 
+# parse compressed textual data(zTXt) chunk
+def parse_zTXt(chunk, ihdr):
+    assert chunk[0] == b'zTXt'
+    key, _, data = chunk[1].partition(b'\x00')
+    print(f'  Keyword="{key.decode("latin-1")}"')
+    assert data[0] == 0, 'Unknown compression method'
+    text = zlib.decompress(data[1:])
+    print(f'  Text="{text.decode("latin-1")}" (compressed {len(data[1:])} bytes)')
+
+
 # parse background colour(bKGD) chunk
 def parse_bKGD(chunk, ihdr):
     assert chunk[0] == b'bKGD'
     ct = ihdr['color']
     if ct == 0 or ct == 4:
-        bg = struct.unpack('>H', chunk[1])
+        bg, = struct.unpack('>H', chunk[1])
         print(f'  Grayscale={bg}')
     if ct == 2 or ct == 6:
         br, bg, bb = struct.unpack('>HHH', chunk[1])
@@ -322,7 +332,8 @@ def process_png(fin, fout, args):
     fout.write(PNG_SIG)
     # read PNG chunks (with filter)
     png, ihdr = [], None
-    parser = {b'cHRM': parse_cHRM, b'bKGD': parse_bKGD, b'tEXt': parse_tEXt, b'tIME': parse_tIME}
+    parser = {b'cHRM': parse_cHRM, b'bKGD': parse_bKGD, b'tEXt': parse_tEXt,
+              b'zTXt': parse_zTXt, b'tIME': parse_tIME}
     while True:
         chunk = read_chunk(fin, args)
         if chunk[0] in args.keep:
